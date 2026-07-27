@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>おとしもの — 場所に、音を置いていく。</title>
+<meta name="theme-color" content="#12141F">
+<meta name="description" content="地図上の場所に曲を置いて、そこを歩いたときに鳴らす実験。">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Old+Mincho:wght@400;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+/* ─────────────────────────────────────────────
+   おとしもの / design tokens
+   夜の街を歩く体験。世界は灰色で、置いた音だけが街灯のように灯る。
+   ───────────────────────────────────────────── */
+:root{
+  --sumi:   #0C0E16;   /* 最下層 */
+  --yoru:   #12141F;   /* 地 */
+  --kage:   #1A1D2B;   /* 面 */
+  --sen:    #2C3145;   /* 罫 */
+  --gairo:  #F2A65A;   /* 街灯＝置いた音 */
+  --gairo-d:#7A5730;
+  --ima:    #6FD6C4;   /* 今＝自分の位置 */
+  --kioku:  #E9E5DC;   /* 文字 */
+  --shizuka:#818AA3;   /* 副文字 */
+  --kiken:  #E0685F;
+
+  --display:'Zen Old Mincho', serif;
+  --body:'Zen Kaku Gothic New', system-ui, -apple-system, sans-serif;
+  --mono:'IBM Plex Mono', ui-monospace, monospace;
+
+  --sb: env(safe-area-inset-bottom, 0px);
+  --st: env(safe-area-inset-top, 0px);
+}
+
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;}
+body{
+  background:var(--sumi);
+  color:var(--kioku);
+  font-family:var(--body);
+  font-size:15px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit;font-size:inherit;color:inherit;border:0;background:none;cursor:pointer;}
+input,select{font-family:inherit;font-size:16px;color:inherit;}
+
+#app{position:fixed;inset:0;display:flex;flex-direction:column;}
+
+/* ── 上部バー ───────────────────────────── */
+.bar{
+  position:relative;z-index:600;
+  padding:calc(var(--st) + 12px) 16px 12px;
+  display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+  background:linear-gradient(180deg, var(--yoru) 60%, rgba(18,20,31,0));
+  pointer-events:none;
+}
+.brand{display:flex;align-items:baseline;gap:9px;}
+.brand-name{
+  font-family:var(--display);font-weight:700;font-size:19px;letter-spacing:.14em;
+}
+.brand-sub{
+  font-size:10.5px;letter-spacing:.16em;color:var(--shizuka);
+}
+.gps{
+  display:flex;align-items:center;gap:7px;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;color:var(--shizuka);
+  white-space:nowrap;
+}
+.gps-dot{
+  width:6px;height:6px;border-radius:50%;background:var(--sen);flex:none;
+  transition:background .4s;
+}
+.gps-dot.live{background:var(--ima);animation:breathe 2.4s ease-in-out infinite;}
+.gps-dot.weak{background:var(--gairo);}
+.gps-dot.bad{background:var(--kiken);}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ── 地図 ───────────────────────────────── */
+#map{position:absolute;inset:0;z-index:1;background:var(--sumi);}
+.leaflet-container{background:var(--sumi);font-family:var(--body);}
+.leaflet-control-attribution{
+  background:rgba(12,14,22,.72)!important;color:var(--shizuka)!important;
+  font-size:9px!important;font-family:var(--mono)!important;
+}
+.leaflet-control-attribution a{color:var(--shizuka)!important;}
+.leaflet-control-zoom{display:none;}
+/* 帰属表示をドックの上に逃がす */
+.leaflet-bottom{bottom:calc(var(--dockh, 132px) + 2px);}
+/* 世界は灰色に沈める */
+.leaflet-tile-pane{filter:saturate(.25) brightness(.82) contrast(1.05);}
+
+/* ピン */
+.pin{position:relative;width:16px;height:16px;}
+.pin i{
+  position:absolute;inset:3px;border-radius:50%;
+  background:var(--gairo);box-shadow:0 0 12px 2px rgba(242,166,90,.55);
+  display:block;
+}
+.pin::after{
+  content:'';position:absolute;inset:0;border-radius:50%;
+  border:1px solid rgba(242,166,90,.4);
+}
+.pin.near i{animation:pulse 1.1s ease-out infinite;}
+.pin.playing i{background:#FFD9A8;box-shadow:0 0 26px 8px rgba(242,166,90,.85);}
+@keyframes pulse{
+  0%{box-shadow:0 0 0 0 rgba(242,166,90,.6);}
+  100%{box-shadow:0 0 0 16px rgba(242,166,90,0);}
+}
+.pin-label{
+  position:absolute;left:22px;top:-1px;white-space:nowrap;
+  font-size:11px;letter-spacing:.05em;color:var(--kioku);
+  text-shadow:0 1px 6px #000, 0 0 2px #000;
+}
+/* 自分 */
+.me{width:14px;height:14px;position:relative;}
+.me i{
+  position:absolute;inset:0;border-radius:50%;background:var(--ima);
+  border:2px solid var(--sumi);box-shadow:0 0 14px 3px rgba(111,214,196,.5);display:block;
+}
+
+/* ── 接近メーター（地図の上に浮く）───────── */
+.approach{
+  position:absolute;left:16px;right:16px;top:calc(var(--st) + 58px);z-index:520;
+  display:flex;align-items:baseline;gap:10px;
+  pointer-events:none;opacity:0;transform:translateY(-6px);
+  transition:opacity .45s,transform .45s;
+}
+.approach.show{opacity:1;transform:none;}
+.approach-label{font-size:10.5px;letter-spacing:.16em;color:var(--shizuka);}
+.approach-dist{
+  font-family:var(--mono);font-size:26px;font-weight:500;letter-spacing:-.01em;
+  color:var(--gairo);line-height:1;
+  text-shadow:0 2px 14px rgba(0,0,0,.9);
+}
+.approach-name{
+  font-size:11.5px;color:var(--shizuka);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
+/* ── 署名要素：タイトルカード ─────────────── */
+.titlecard{
+  position:absolute;inset:0;z-index:540;
+  display:flex;align-items:center;justify-content:center;
+  pointer-events:none;opacity:0;transition:opacity 1.2s ease;
+  background:radial-gradient(ellipse at 50% 48%, rgba(242,166,90,.20), rgba(12,14,22,.86) 62%);
+}
+.titlecard.show{opacity:1;}
+.titlecard-inner{
+  text-align:center;padding:0 32px;max-width:520px;
+  transform:translateY(14px);transition:transform 1.6s cubic-bezier(.16,.84,.28,1);
+}
+.titlecard.show .titlecard-inner{transform:none;}
+.tc-eyebrow{
+  font-size:10.5px;letter-spacing:.34em;color:var(--gairo);margin-bottom:22px;
+  text-indent:.34em;
+}
+.tc-song{
+  font-family:var(--display);font-weight:400;font-size:30px;line-height:1.45;
+  letter-spacing:.06em;margin-bottom:18px;word-break:break-word;
+}
+.tc-place{font-size:12.5px;letter-spacing:.14em;color:var(--shizuka);}
+
+/* ── 下部ドック ───────────────────────────── */
+.dock{
+  position:relative;z-index:600;margin-top:auto;
+  padding:14px 14px calc(var(--sb) + 14px);
+  background:linear-gradient(0deg, var(--yoru) 66%, rgba(18,20,31,0));
+}
+.now{
+  display:flex;align-items:center;gap:11px;
+  padding:11px 14px;margin-bottom:11px;
+  background:var(--kage);border:1px solid var(--gairo-d);border-radius:3px;
+}
+.now[hidden]{display:none;}
+.now-eq{display:flex;align-items:flex-end;gap:2.5px;height:15px;flex:none;}
+.now-eq span{width:2.5px;background:var(--gairo);border-radius:1px;animation:eq .9s ease-in-out infinite;}
+.now-eq span:nth-child(1){height:40%;animation-delay:0s}
+.now-eq span:nth-child(2){height:95%;animation-delay:.18s}
+.now-eq span:nth-child(3){height:60%;animation-delay:.36s}
+.now-eq span:nth-child(4){height:80%;animation-delay:.09s}
+@keyframes eq{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+.now-txt{min-width:0;flex:1;}
+.now-song{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.now-place{font-size:10.5px;color:var(--shizuka);letter-spacing:.06em;}
+.now-stop{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--shizuka);
+  border:1px solid var(--sen);border-radius:2px;padding:5px 9px;flex:none;
+}
+
+.segs{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;background:var(--sen);
+  padding:1px;border-radius:3px;}
+.seg{
+  padding:13px 4px;background:var(--yoru);text-align:center;
+  font-size:13.5px;font-weight:500;letter-spacing:.14em;color:var(--shizuka);
+  transition:background .2s,color .2s;
+}
+.seg small{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;
+  opacity:.6;margin-top:3px;font-weight:400;}
+.seg.on{background:var(--kage);color:var(--kioku);box-shadow:inset 0 -2px 0 var(--gairo);}
+.seg.on[data-mode="walk"]{box-shadow:inset 0 -2px 0 var(--ima);}
+
+.dock-foot{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px;
+}
+.counts{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;color:var(--shizuka);}
+.dock-btns{display:flex;gap:7px;}
+.tbtn{
+  padding:8px 13px;border:1px solid var(--sen);border-radius:2px;
+  font-size:11.5px;letter-spacing:.1em;color:var(--kioku);
+}
+.tbtn:active{background:var(--kage);}
+
+/* ── ヒント ────────────────────────────── */
+.hint{
+  padding:0 6px 11px;text-align:center;
+  font-size:11.5px;letter-spacing:.06em;color:var(--shizuka);
+  text-shadow:0 1px 8px #000;
+}
+
+/* ── シート（一覧）─────────────────────── */
+.scrim{
+  position:absolute;inset:0;z-index:800;background:rgba(8,9,15,.72);
+  opacity:0;pointer-events:none;transition:opacity .3s;
+  backdrop-filter:blur(2px);
+}
+.scrim.show{opacity:1;pointer-events:auto;}
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;z-index:810;
+  max-height:82%;display:flex;flex-direction:column;
+  background:var(--yoru);border-top:1px solid var(--sen);
+  border-radius:10px 10px 0 0;
+  transform:translateY(101%);transition:transform .38s cubic-bezier(.3,.9,.3,1);
+  padding-bottom:var(--sb);
+}
+.sheet.show{transform:none;}
+.sheet-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 18px 12px;border-bottom:1px solid var(--sen);flex:none;
+}
+.sheet-title{font-family:var(--display);font-size:16px;letter-spacing:.16em;}
+.sheet-close{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--shizuka);padding:6px 4px;}
+.sheet-body{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 0 22px;}
+
+.sec-head{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:20px 18px 9px;
+}
+.sec-name{font-size:10.5px;letter-spacing:.26em;color:var(--shizuka);}
+.sec-add{
+  font-size:11.5px;letter-spacing:.08em;color:var(--gairo);
+  border:1px solid var(--gairo-d);border-radius:2px;padding:6px 11px;
+}
+
+.row{
+  display:flex;align-items:center;gap:12px;
+  padding:12px 18px;border-top:1px solid rgba(44,49,69,.5);
+}
+.row-mark{
+  width:7px;height:7px;border-radius:50%;background:var(--gairo);flex:none;
+  box-shadow:0 0 8px rgba(242,166,90,.6);
+}
+.row-mark.mute{background:var(--sen);box-shadow:none;}
+.row-txt{flex:1;min-width:0;}
+.row-name{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.row-meta{font-family:var(--mono);font-size:10px;color:var(--shizuka);letter-spacing:.05em;margin-top:2px;}
+.row-act{font-family:var(--mono);font-size:10.5px;color:var(--shizuka);padding:7px 6px;letter-spacing:.06em;flex:none;}
+.row-act.warn{color:var(--kiken);}
+.empty{padding:14px 18px 4px;font-size:12.5px;color:var(--shizuka);line-height:1.9;}
+
+/* ── ダイアログ ───────────────────────── */
+.dlg{
+  position:absolute;inset:0;z-index:900;display:none;
+  align-items:center;justify-content:center;padding:20px;
+  background:rgba(8,9,15,.8);backdrop-filter:blur(3px);
+}
+.dlg.show{display:flex;}
+.dlg-box{
+  width:100%;max-width:400px;max-height:88%;overflow-y:auto;
+  background:var(--yoru);border:1px solid var(--sen);border-radius:5px;padding:22px 20px;
+}
+.dlg-title{font-family:var(--display);font-size:17px;letter-spacing:.1em;margin-bottom:5px;}
+.dlg-note{font-family:var(--mono);font-size:10.5px;color:var(--shizuka);margin-bottom:20px;letter-spacing:.04em;}
+.fld{margin-bottom:17px;}
+.fld label{display:block;font-size:10.5px;letter-spacing:.2em;color:var(--shizuka);margin-bottom:7px;}
+.fld input,.fld select{
+  width:100%;padding:11px 12px;background:var(--kage);
+  border:1px solid var(--sen);border-radius:2px;outline:none;
+}
+.fld input:focus,.fld select:focus{border-color:var(--gairo-d);}
+.fld-hint{font-size:10.5px;color:var(--shizuka);margin-top:6px;line-height:1.6;}
+.fld-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.dlg-btns{display:flex;gap:9px;margin-top:22px;}
+.dlg-btns button{flex:1;padding:13px;border-radius:2px;font-size:13.5px;letter-spacing:.12em;}
+.b-ghost{border:1px solid var(--sen);color:var(--shizuka);}
+.b-fill{background:var(--gairo);color:#1A1206;font-weight:700;}
+
+.toast{
+  position:absolute;left:50%;bottom:calc(var(--sb) + 132px);z-index:950;
+  transform:translate(-50%,10px);
+  background:var(--kage);border:1px solid var(--sen);border-radius:3px;
+  padding:11px 17px;font-size:12.5px;letter-spacing:.04em;
+  max-width:88%;text-align:center;
+  opacity:0;pointer-events:none;transition:opacity .3s,transform .3s;
+}
+.toast.show{opacity:1;transform:translate(-50%,0);}
+
+*:focus-visible{outline:2px solid var(--ima);outline-offset:2px;}
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms!important;transition-duration:.08s!important;}
+}
+@media (max-width:360px){
+  .seg{font-size:12px;letter-spacing:.08em;}
+  .approach-dist{font-size:22px;}
+}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header class="bar">
+    <div class="brand">
+      <span class="brand-name">おとしもの</span>
+      <span class="brand-sub">場所に、音を置いていく。</span>
+    </div>
+    <div class="gps">
+      <span class="gps-dot" id="gpsDot"></span>
+      <span id="gpsText">待機中</span>
+    </div>
+  </header>
+
+  <div id="map"></div>
+
+  <div class="approach" id="approach">
+    <span class="approach-label">最も近い音</span>
+    <span class="approach-dist" id="apDist">—</span>
+    <span class="approach-name" id="apName"></span>
+  </div>
+
+  <div class="titlecard" id="titlecard">
+    <div class="titlecard-inner">
+      <div class="tc-eyebrow">ここに置いた音</div>
+      <div class="tc-song" id="tcSong"></div>
+      <div class="tc-place" id="tcPlace"></div>
+    </div>
+  </div>
+
+  <div class="dock" id="dock">
+    <div class="hint" id="hint"></div>
+
+    <div class="now" id="now" hidden>
+      <div class="now-eq"><span></span><span></span><span></span><span></span></div>
+      <div class="now-txt">
+        <div class="now-song" id="nowSong"></div>
+        <div class="now-place" id="nowPlace"></div>
+      </div>
+      <button class="now-stop" id="nowStop">とめる</button>
+    </div>
+
+    <div class="segs" role="tablist">
+      <button class="seg on" data-mode="place" role="tab">置く<small>PLACE</small></button>
+      <button class="seg" data-mode="walk" role="tab">歩く<small>GPS</small></button>
+      <button class="seg" data-mode="test" role="tab">試す<small>SIMULATE</small></button>
+    </div>
+
+    <div class="dock-foot">
+      <div class="counts" id="counts">曲 0 · 場所 0</div>
+      <div class="dock-btns">
+        <button class="tbtn" id="openSheet">一覧</button>
+        <button class="tbtn" id="recenter">現在地</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 一覧シート -->
+  <div class="scrim" id="scrim"></div>
+  <div class="sheet" id="sheet">
+    <div class="sheet-head">
+      <div class="sheet-title">置いたもの</div>
+      <button class="sheet-close" id="closeSheet">とじる</button>
+    </div>
+    <div class="sheet-body">
+      <div class="sec-head">
+        <div class="sec-name">場 所</div>
+      </div>
+      <div id="pinList"></div>
+
+      <div class="sec-head">
+        <div class="sec-name">曲</div>
+        <button class="sec-add" id="addSongBtn">＋ 曲を追加</button>
+      </div>
+      <div id="songList"></div>
+    </div>
+  </div>
+
+  <!-- ピン作成／編集ダイアログ -->
+  <div class="dlg" id="pinDlg">
+    <div class="dlg-box">
+      <div class="dlg-title" id="pinDlgTitle">この場所に音を置く</div>
+      <div class="dlg-note" id="pinDlgCoord"></div>
+
+      <div class="fld">
+        <label for="pinName">場所の名前</label>
+        <input id="pinName" type="text" placeholder="駅の裏の坂道" autocomplete="off">
+      </div>
+
+      <div class="fld">
+        <label for="pinSong">鳴らす曲</label>
+        <select id="pinSong"></select>
+        <button class="sec-add" id="dlgAddSong" style="margin-top:9px;">＋ 端末から曲を追加</button>
+        <div class="fld-hint" id="noSongHint" hidden>曲がまだありません。まず端末の音楽ファイルを追加してください。</div>
+      </div>
+
+      <div class="fld fld-2">
+        <div>
+          <label for="pinRadius">半径 (m)</label>
+          <input id="pinRadius" type="number" min="10" max="500" step="5" value="40">
+        </div>
+        <div>
+          <label for="pinStart">開始位置 (秒)</label>
+          <input id="pinStart" type="number" min="0" step="1" value="0">
+        </div>
+      </div>
+      <div class="fld-hint">GPS は市街地で 20〜50m ずれます。半径は 30〜50m を目安に。開始位置を指定すると、イントロを飛ばしてサビから鳴らせます。</div>
+
+      <div class="dlg-btns">
+        <button class="b-ghost" id="pinCancel">やめる</button>
+        <button class="b-fill" id="pinSave">置く</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<input type="file" id="filePick" accept="audio/*" multiple hidden>
+<audio id="player" playsinline preload="auto"></audio>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+"use strict";
+
+/* ══════════════════════════════════════════
+   1. 保存層 (IndexedDB)
+   ══════════════════════════════════════════ */
+const DB_NAME = "otoshimono", DB_VER = 1;
+let db = null;
+
+function openDB(){
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, DB_VER);
+    r.onupgradeneeded = e => {
+      const d = e.target.result;
+      if(!d.objectStoreNames.contains("songs")) d.createObjectStore("songs", {keyPath:"id"});
+      if(!d.objectStoreNames.contains("pins"))  d.createObjectStore("pins",  {keyPath:"id"});
+    };
+    r.onsuccess = e => res(e.target.result);
+    r.onerror   = () => rej(r.error);
+  });
+}
+function tx(store, mode){ return db.transaction(store, mode).objectStore(store); }
+function dbAll(store){
+  return new Promise((res, rej) => {
+    const r = tx(store, "readonly").getAll();
+    r.onsuccess = () => res(r.result || []);
+    r.onerror = () => rej(r.error);
+  });
+}
+function dbPut(store, val){
+  return new Promise((res, rej) => {
+    const r = tx(store, "readwrite").put(val);
+    r.onsuccess = () => res(val);
+    r.onerror = () => rej(r.error);
+  });
+}
+function dbDel(store, id){
+  return new Promise((res, rej) => {
+    const r = tx(store, "readwrite").delete(id);
+    r.onsuccess = () => res();
+    r.onerror = () => rej(r.error);
+  });
+}
+
+/* ══════════════════════════════════════════
+   2. 状態
+   ══════════════════════════════════════════ */
+const S = {
+  mode: "place",          // place | walk | test
+  songs: [],
+  pins: [],
+  me: null,               // {lat, lng, acc}
+  playingPinId: null,
+  watchId: null,
+  wakeLock: null,
+  draftLatLng: null,
+  editingPinId: null,
+  markers: new Map(),     // pinId -> {marker, circle, el}
+  meMarker: null,
+  meCircle: null,
+  followMe: true,
+};
+
+const EXIT_FACTOR = 1.6;  // 半径のこの倍まで離れたら再発火を許可
+const FADE_IN = 1.6, FADE_OUT = 2.8;
+
+const $ = id => document.getElementById(id);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+/* ══════════════════════════════════════════
+   3. 音まわり (Web Audio でフェード)
+   ══════════════════════════════════════════ */
+const player = $("player");
+let actx = null, gain = null, srcNode = null, audioReady = false, curURL = null;
+const SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=";
+
+/** 必ずユーザー操作ハンドラの中から同期的に呼ぶこと (iOS 対策) */
+function unlockAudio(){
+  if(audioReady) { if(actx && actx.state === "suspended") actx.resume(); return; }
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    actx = new AC();
+    srcNode = actx.createMediaElementSource(player);
+    gain = actx.createGain();
+    gain.gain.value = 0;
+    srcNode.connect(gain).connect(actx.destination);
+    actx.resume();
+    player.src = SILENCE;
+    const p = player.play();
+    if(p && p.catch) p.catch(()=>{});
+    audioReady = true;
+  }catch(err){
+    console.warn("audio unlock failed", err);
+  }
+}
+
+function rampTo(v, sec){
+  if(!gain || !actx) return;
+  const t = actx.currentTime;
+  gain.gain.cancelScheduledValues(t);
+  gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), t);
+  gain.gain.linearRampToValueAtTime(v, t + sec);
+}
+
+async function playPin(pin){
+  const song = S.songs.find(s => s.id === pin.songId);
+  if(!song){ toast("この場所の曲が見つかりません"); return; }
+  if(!audioReady){ toast("「歩く」または「試す」を押して音を有効にしてください"); return; }
+
+  if(curURL){ URL.revokeObjectURL(curURL); curURL = null; }
+  curURL = URL.createObjectURL(song.blob);
+
+  S.playingPinId = pin.id;
+
+  // 前の曲のフェード予約を消してから無音に落とす
+  if(gain && actx){
+    const t = actx.currentTime;
+    gain.gain.cancelScheduledValues(t);
+    gain.gain.setValueAtTime(0.0001, t);
+  }
+
+  player.src = curURL;
+  if(actx && actx.state === "suspended") await actx.resume();
+
+  try{ await player.play(); }
+  catch(err){ console.warn(err); toast("再生できませんでした"); S.playingPinId = null; return; }
+
+  if(pin.startAt > 0){
+    const seek = () => { try{ player.currentTime = pin.startAt; }catch(e){} };
+    if(player.readyState >= 1) seek();
+    else player.addEventListener("loadedmetadata", seek, {once:true});
+  }
+
+  rampTo(1, FADE_IN);
+
+  showNow(song.name, pin.name);
+  showTitleCard(song.name, pin.name);
+  paintMarkers();
+}
+
+function stopPlaying(fade = FADE_OUT){
+  if(!S.playingPinId) return;
+  S.playingPinId = null;
+  rampTo(0.0001, fade);
+  const el = player;
+  setTimeout(() => { if(!S.playingPinId){ el.pause(); } }, fade * 1000 + 60);
+  hideNow();
+  paintMarkers();
+}
+
+player.addEventListener("ended", () => { S.playingPinId = null; hideNow(); paintMarkers(); });
+
+/* ══════════════════════════════════════════
+   4. 地図
+   ══════════════════════════════════════════ */
+const map = L.map("map", { zoomControl:false, attributionControl:true, tap:true })
+  .setView([35.681236, 139.767125], 16);   // 初期値：東京駅
+
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  attribution:'&copy; OpenStreetMap &copy; CARTO',
+  subdomains:"abcd", maxZoom:20
+}).addTo(map);
+
+map.on("dragstart", () => { S.followMe = false; });
+
+map.on("click", e => {
+  if(S.mode === "place"){
+    openPinDialog(e.latlng);
+  }else if(S.mode === "test"){
+    setMe(e.latlng.lat, e.latlng.lng, 8);
+  }
+});
+
+function pinIcon(pin, cls){
+  const label = pin.name ? `<span class="pin-label">${esc(pin.name)}</span>` : "";
+  return L.divIcon({
+    className:"", iconSize:[16,16], iconAnchor:[8,8],
+    html:`<div class="pin ${cls}"><i></i>${label}</div>`
+  });
+}
+function meIcon(){
+  return L.divIcon({ className:"", iconSize:[14,14], iconAnchor:[7,7], html:`<div class="me"><i></i></div>` });
+}
+
+function renderPins(){
+  S.markers.forEach(m => { map.removeLayer(m.marker); map.removeLayer(m.circle); });
+  S.markers.clear();
+  S.pins.forEach(pin => {
+    const circle = L.circle([pin.lat, pin.lng], {
+      radius: pin.radius, color:"#F2A65A", weight:1, opacity:.34,
+      fillColor:"#F2A65A", fillOpacity:.06, interactive:false
+    }).addTo(map);
+    const marker = L.marker([pin.lat, pin.lng], { icon: pinIcon(pin, ""), keyboard:false }).addTo(map);
+    marker.on("click", ev => {
+      if(ev.originalEvent) L.DomEvent.stopPropagation(ev.originalEvent);
+      if(S.mode === "place") openPinDialog(null, pin.id);
+      else if(S.mode === "test") setMe(pin.lat, pin.lng, 8);
+    });
+    S.markers.set(pin.id, { marker, circle });
+  });
+  paintMarkers();
+}
+
+/** 距離に応じてピンの見た目を更新 */
+function paintMarkers(){
+  S.pins.forEach(pin => {
+    const m = S.markers.get(pin.id);
+    if(!m) return;
+    let cls = "";
+    if(S.playingPinId === pin.id) cls = "playing";
+    else if(S.me){
+      const d = distM(S.me, pin);
+      if(d < pin.radius * 2.2) cls = "near";
+    }
+    m.marker.setIcon(pinIcon(pin, cls));
+    const playing = S.playingPinId === pin.id;
+    m.circle.setStyle({
+      opacity: playing ? .85 : .34,
+      fillOpacity: playing ? .17 : .06,
+      weight: playing ? 2 : 1
+    });
+  });
+}
+
+function distM(a, b){
+  const R = 6371000, rad = Math.PI/180;
+  const p1 = a.lat*rad, p2 = b.lat*rad;
+  const dp = (b.lat-a.lat)*rad, dl = (b.lng-a.lng)*rad;
+  const s = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+/* ══════════════════════════════════════════
+   5. 位置と発火判定
+   ══════════════════════════════════════════ */
+function setMe(lat, lng, acc){
+  S.me = { lat, lng, acc: acc || 0 };
+  const ll = [lat, lng];
+  if(!S.meMarker){
+    S.meMarker = L.marker(ll, { icon: meIcon(), interactive:false, zIndexOffset:400 }).addTo(map);
+    S.meCircle = L.circle(ll, { radius: S.me.acc, color:"#6FD6C4", weight:1, opacity:.3,
+      fillColor:"#6FD6C4", fillOpacity:.05, interactive:false }).addTo(map);
+  }else{
+    S.meMarker.setLatLng(ll);
+    S.meCircle.setLatLng(ll).setRadius(S.me.acc);
+  }
+  if(S.followMe) map.panTo(ll, { animate:true, duration:.6 });
+  checkProximity();
+  updateApproach();
+  paintMarkers();
+}
+
+function checkProximity(){
+  if(!S.me || S.mode === "place") return;
+  for(const pin of S.pins){
+    const d = distM(S.me, pin);
+    if(d <= pin.radius){
+      // 別の曲が鳴っている間は発火済みにしない。
+      // そうしないと、鳴り終わったあとその場所が二度と鳴らなくなる。
+      if(!pin._fired && !S.playingPinId){
+        pin._fired = true;
+        playPin(pin);
+      }
+    }else if(d > pin.radius * EXIT_FACTOR){
+      pin._fired = false;
+      if(S.playingPinId === pin.id) stopPlaying();
+    }
+  }
+}
+
+function updateApproach(){
+  const box = $("approach");
+  if(!S.me || S.mode === "place" || S.pins.length === 0){ box.classList.remove("show"); return; }
+  let best = null, bestD = Infinity;
+  for(const pin of S.pins){
+    const d = distM(S.me, pin);
+    if(d < bestD){ bestD = d; best = pin; }
+  }
+  if(!best){ box.classList.remove("show"); return; }
+  const inside = bestD <= best.radius;
+  $("apDist").textContent = inside ? "到着" : Math.round(bestD) + "m";
+  $("apName").textContent = best.name || "名前のない場所";
+  box.classList.add("show");
+}
+
+/* ── GPS ── */
+function startGPS(){
+  if(!navigator.geolocation){ toast("この端末では位置情報が使えません"); return false; }
+  setGPS("weak", "取得中…");
+  S.followMe = true;
+  S.watchId = navigator.geolocation.watchPosition(
+    pos => {
+      const a = pos.coords.accuracy;
+      setGPS(a <= 25 ? "live" : a <= 70 ? "weak" : "bad", "±" + Math.round(a) + "m");
+      setMe(pos.coords.latitude, pos.coords.longitude, a);
+    },
+    err => {
+      setGPS("bad", err.code === 1 ? "許可なし" : "取得失敗");
+      if(err.code === 1) toast("位置情報が拒否されています。ブラウザの設定で許可してください");
+    },
+    { enableHighAccuracy:true, maximumAge:1500, timeout:20000 }
+  );
+  return true;
+}
+function stopGPS(){
+  if(S.watchId != null){ navigator.geolocation.clearWatch(S.watchId); S.watchId = null; }
+  setGPS("", "待機中");
+}
+function setGPS(cls, text){
+  $("gpsDot").className = "gps-dot " + cls;
+  $("gpsText").textContent = text;
+}
+
+/* ── 画面ロック防止 ── */
+async function acquireWakeLock(){
+  if(!("wakeLock" in navigator)) return;
+  try{
+    S.wakeLock = await navigator.wakeLock.request("screen");
+    S.wakeLock.addEventListener("release", () => { S.wakeLock = null; });
+  }catch(e){ console.warn("wakeLock", e); }
+}
+function releaseWakeLock(){
+  if(S.wakeLock){ S.wakeLock.release().catch(()=>{}); S.wakeLock = null; }
+}
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && S.mode === "walk" && !S.wakeLock) acquireWakeLock();
+});
+
+/* ══════════════════════════════════════════
+   6. モード切替
+   ══════════════════════════════════════════ */
+function setMode(m){
+  if(m === S.mode) return;
+
+  // 「歩く」「試す」に入るときは、必ずこの同期パスで音を解禁する
+  if(m === "walk" || m === "test") unlockAudio();
+
+  S.mode = m;
+  document.querySelectorAll(".seg").forEach(b => b.classList.toggle("on", b.dataset.mode === m));
+
+  if(m === "walk"){
+    startGPS(); acquireWakeLock();
+  }else{
+    stopGPS(); releaseWakeLock();
+  }
+  if(m === "place") stopPlaying(1.2);
+
+  S.pins.forEach(p => { p._fired = false; });
+  updateHint();
+  updateApproach();
+  checkProximity();
+}
+
+function updateHint(){
+  const h = $("hint");
+  if(S.pins.length === 0 && S.mode === "place"){
+    h.textContent = "地図をタップして、最初の場所を置く";
+  }else if(S.mode === "place"){
+    h.textContent = "地図をタップして場所を追加／ピンをタップして編集";
+  }else if(S.mode === "test"){
+    h.textContent = "地図をタップすると、そこに立ったことになります";
+  }else{
+    h.textContent = "画面を点けたままポケットへ。イヤホンをして歩いてください";
+  }
+}
+
+/* ══════════════════════════════════════════
+   7. UI
+   ══════════════════════════════════════════ */
+function esc(s){
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+let toastTimer = null;
+function toast(msg){
+  const t = $("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+function showNow(song, place){
+  $("nowSong").textContent = song;
+  $("nowPlace").textContent = place || "名前のない場所";
+  $("now").hidden = false;
+}
+function hideNow(){ $("now").hidden = true; }
+
+let tcTimer = null;
+function showTitleCard(song, place){
+  $("tcSong").textContent = song;
+  $("tcPlace").textContent = place || "名前のない場所";
+  const tc = $("titlecard");
+  tc.classList.add("show");
+  clearTimeout(tcTimer);
+  tcTimer = setTimeout(() => tc.classList.remove("show"), 5200);
+}
+
+function updateCounts(){
+  $("counts").textContent = `曲 ${S.songs.length} · 場所 ${S.pins.length}`;
+}
+
+function renderLists(){
+  // 場所
+  const pl = $("pinList");
+  if(S.pins.length === 0){
+    pl.innerHTML = `<div class="empty">まだどこにも置かれていません。<br>「置く」モードで地図をタップしてください。</div>`;
+  }else{
+    pl.innerHTML = "";
+    S.pins.forEach(pin => {
+      const song = S.songs.find(s => s.id === pin.songId);
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `
+        <span class="row-mark ${song ? "" : "mute"}"></span>
+        <div class="row-txt">
+          <div class="row-name">${esc(pin.name || "名前のない場所")}</div>
+          <div class="row-meta">${song ? esc(song.name) : "曲が未設定"} · r${pin.radius}m${pin.startAt ? " · " + pin.startAt + "s〜" : ""}</div>
+        </div>
+        <button class="row-act" data-go="${pin.id}">地図</button>
+        <button class="row-act warn" data-delpin="${pin.id}">削除</button>`;
+      pl.appendChild(row);
+    });
+  }
+
+  // 曲
+  const sl = $("songList");
+  if(S.songs.length === 0){
+    sl.innerHTML = `<div class="empty">端末に入っている音楽ファイル（mp3 / m4a など）を追加します。<br>ファイルは端末の中だけに保存され、外には送られません。</div>`;
+  }else{
+    sl.innerHTML = "";
+    S.songs.forEach(song => {
+      const used = S.pins.filter(p => p.songId === song.id).length;
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `
+        <span class="row-mark ${used ? "" : "mute"}"></span>
+        <div class="row-txt">
+          <div class="row-name">${esc(song.name)}</div>
+          <div class="row-meta">${(song.size/1048576).toFixed(1)}MB${used ? " · " + used + "か所で使用" : " · 未使用"}</div>
+        </div>
+        <button class="row-act warn" data-delsong="${song.id}">削除</button>`;
+      sl.appendChild(row);
+    });
+  }
+  updateCounts();
+  updateHint();
+}
+
+/* シート */
+function openSheet(){ $("sheet").classList.add("show"); $("scrim").classList.add("show"); renderLists(); }
+function closeSheet(){ $("sheet").classList.remove("show"); $("scrim").classList.remove("show"); }
+
+/* ピンダイアログ */
+function openPinDialog(latlng, editId){
+  S.draftLatLng = latlng;
+  S.editingPinId = editId || null;
+
+  const sel = $("pinSong");
+  sel.innerHTML = S.songs.length
+    ? S.songs.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("")
+    : `<option value="">— 曲がありません —</option>`;
+  $("noSongHint").hidden = S.songs.length > 0;
+
+  if(editId){
+    const pin = S.pins.find(p => p.id === editId);
+    if(!pin) return;
+    $("pinDlgTitle").textContent = "この場所を編集する";
+    $("pinDlgCoord").textContent = pin.lat.toFixed(5) + ", " + pin.lng.toFixed(5);
+    $("pinName").value = pin.name || "";
+    $("pinRadius").value = pin.radius;
+    $("pinStart").value = pin.startAt || 0;
+    if(pin.songId) sel.value = pin.songId;
+    $("pinSave").textContent = "更新する";
+  }else{
+    $("pinDlgTitle").textContent = "この場所に音を置く";
+    $("pinDlgCoord").textContent = latlng.lat.toFixed(5) + ", " + latlng.lng.toFixed(5);
+    $("pinName").value = "";
+    $("pinRadius").value = 40;
+    $("pinStart").value = 0;
+    $("pinSave").textContent = "置く";
+  }
+  $("pinDlg").classList.add("show");
+}
+function closePinDialog(){ $("pinDlg").classList.remove("show"); S.draftLatLng = null; S.editingPinId = null; }
+
+async function savePin(){
+  const songId = $("pinSong").value;
+  if(!songId){ toast("先に曲を追加してください"); return; }
+  const name = $("pinName").value.trim();
+  const radius = Math.max(10, Math.min(500, parseInt($("pinRadius").value, 10) || 40));
+  const startAt = Math.max(0, parseInt($("pinStart").value, 10) || 0);
+
+  let pin;
+  if(S.editingPinId){
+    pin = S.pins.find(p => p.id === S.editingPinId);
+    Object.assign(pin, { name, songId, radius, startAt });
+  }else{
+    pin = { id: uid(), lat: S.draftLatLng.lat, lng: S.draftLatLng.lng, name, songId, radius, startAt, createdAt: Date.now() };
+    S.pins.push(pin);
+  }
+  await dbPut("pins", stripPin(pin));
+  closePinDialog();
+  renderPins(); renderLists();
+  toast(S.editingPinId ? "更新しました" : "置きました");
+}
+function stripPin(p){
+  const { id, lat, lng, name, songId, radius, startAt, createdAt } = p;
+  return { id, lat, lng, name, songId, radius, startAt, createdAt };
+}
+
+/* 曲の追加 */
+$("filePick").addEventListener("change", async e => {
+  const files = Array.from(e.target.files || []);
+  if(files.length === 0) return;
+  for(const f of files){
+    const song = { id: uid(), name: f.name.replace(/\.[^.]+$/, ""), blob: f, size: f.size, addedAt: Date.now() };
+    S.songs.push(song);
+    await dbPut("songs", song);
+  }
+  e.target.value = "";
+  renderLists();
+
+  // ピンのダイアログが開いたままなら、選択肢を更新して最後の1曲を選んでおく
+  if($("pinDlg").classList.contains("show")){
+    const sel = $("pinSong");
+    const keep = sel.value;
+    sel.innerHTML = S.songs.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+    sel.value = S.songs[S.songs.length - 1].id || keep;
+    $("noSongHint").hidden = true;
+  }
+  toast(files.length + "曲を追加しました");
+});
+
+/* ══════════════════════════════════════════
+   8. イベント配線
+   ══════════════════════════════════════════ */
+document.querySelectorAll(".seg").forEach(btn => {
+  btn.addEventListener("click", () => setMode(btn.dataset.mode));
+});
+$("openSheet").addEventListener("click", openSheet);
+$("closeSheet").addEventListener("click", closeSheet);
+$("scrim").addEventListener("click", closeSheet);
+$("addSongBtn").addEventListener("click", () => $("filePick").click());
+$("dlgAddSong").addEventListener("click", () => $("filePick").click());
+$("pinCancel").addEventListener("click", closePinDialog);
+$("pinSave").addEventListener("click", savePin);
+$("nowStop").addEventListener("click", () => stopPlaying(0.8));
+$("recenter").addEventListener("click", () => {
+  if(S.me){ S.followMe = true; map.setView([S.me.lat, S.me.lng], Math.max(map.getZoom(), 17)); }
+  else if(navigator.geolocation){
+    toast("現在地を取得しています…");
+    navigator.geolocation.getCurrentPosition(
+      p => { S.followMe = true; map.setView([p.coords.latitude, p.coords.longitude], 17); setMe(p.coords.latitude, p.coords.longitude, p.coords.accuracy); },
+      () => toast("現在地を取得できませんでした"),
+      { enableHighAccuracy:true, timeout:12000 }
+    );
+  }
+});
+
+document.addEventListener("click", async e => {
+  const go = e.target.closest("[data-go]");
+  if(go){
+    const pin = S.pins.find(p => p.id === go.dataset.go);
+    if(pin){ closeSheet(); S.followMe = false; map.setView([pin.lat, pin.lng], 17); }
+    return;
+  }
+  const dp = e.target.closest("[data-delpin]");
+  if(dp){
+    const pin = S.pins.find(p => p.id === dp.dataset.delpin);
+    if(pin && confirm(`「${pin.name || "名前のない場所"}」を削除しますか？`)){
+      if(S.playingPinId === pin.id) stopPlaying(0.5);
+      S.pins = S.pins.filter(p => p.id !== pin.id);
+      await dbDel("pins", pin.id);
+      renderPins(); renderLists();
+    }
+    return;
+  }
+  const ds = e.target.closest("[data-delsong]");
+  if(ds){
+    const song = S.songs.find(s => s.id === ds.dataset.delsong);
+    if(!song) return;
+    const used = S.pins.filter(p => p.songId === song.id).length;
+    if(confirm(used ? `「${song.name}」は${used}か所で使われています。削除しますか？` : `「${song.name}」を削除しますか？`)){
+      S.songs = S.songs.filter(s => s.id !== song.id);
+      await dbDel("songs", song.id);
+      renderLists(); renderPins();
+    }
+  }
+});
+
+/* ══════════════════════════════════════════
+   9. 起動
+   ══════════════════════════════════════════ */
+(async function init(){
+  try{
+    db = await openDB();
+    S.songs = (await dbAll("songs")).sort((a,b) => a.addedAt - b.addedAt);
+    S.pins  = (await dbAll("pins")).sort((a,b) => a.createdAt - b.createdAt);
+  }catch(err){
+    console.error(err);
+    toast("保存領域を開けませんでした。プライベートブラウズを解除してみてください");
+  }
+
+  renderPins();
+  renderLists();
+  updateHint();
+
+  if(S.pins.length > 0){
+    map.fitBounds(L.latLngBounds(S.pins.map(p => [p.lat, p.lng])).pad(0.4), { maxZoom:17 });
+  }else if(navigator.geolocation){
+    navigator.geolocation.getCurrentPosition(
+      p => { if(S.pins.length === 0) map.setView([p.coords.latitude, p.coords.longitude], 17); },
+      () => {}, { enableHighAccuracy:false, timeout:8000 }
+    );
+  }
+
+  // ドックの高さを CSS 変数に流し込み、地図の帰属表示が隠れないようにする
+  const dock = $("dock");
+  const syncDockHeight = () => {
+    document.documentElement.style.setProperty("--dockh", dock.offsetHeight + "px");
+  };
+  syncDockHeight();
+  if(window.ResizeObserver) new ResizeObserver(syncDockHeight).observe(dock);
+
+  setTimeout(() => { map.invalidateSize(); syncDockHeight(); }, 200);
+  window.addEventListener("resize", () => { map.invalidateSize(); syncDockHeight(); });
+})();
+</script>
+</body>
+</html>
