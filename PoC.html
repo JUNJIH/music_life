@@ -902,6 +902,12 @@ body.night .leaflet-tile-pane{filter:saturate(.55) brightness(1.22) contrast(.94
 .row-meta .wait{color:var(--gairo);}
 .row-act{font-family:var(--mono);font-size:10.5px;color:var(--shizuka);padding:7px 6px;letter-spacing:.06em;flex:none;}
 .row-act.warn{color:var(--kiken);}
+.setrow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 18px;border-top:1px solid rgba(44,49,69,.5);}
+.setrow > label{font-size:12.5px;color:var(--kioku);}
+.setrow input[type=number]{width:100px;padding:9px 10px;background:var(--kage);border:1px solid var(--sen);
+  border-radius:2px;outline:none;text-align:right;font-family:var(--mono);}
+.setrow input[type=number]:focus{border-color:var(--gairo-d);}
+.setrow .chk{padding:0;}
 .empty{padding:14px 18px 4px;font-size:12.5px;color:var(--shizuka);line-height:1.9;}
 
 /* ── ダイアログ ───────────────────────── */
@@ -1035,6 +1041,17 @@ body.night .leaflet-tile-pane{filter:saturate(.55) brightness(1.22) contrast(.94
       <div class="empty" id="swapHint">曲ごと1つのファイルにまとめて渡せます。受け取った側には、鳴るまで曲名が伏せられます。</div>
 
       <div class="sec-head">
+        <div class="sec-name">鳴 ら し 方 の 既 定</div>
+        <button class="sec-add" id="applyAll">既存すべてに適用</button>
+      </div>
+      <div class="setrow"><label for="setDuration">長さ (秒)</label>
+        <input id="setDuration" type="number" min="0" max="900" step="5"></div>
+      <div class="setrow"><label for="setFade">フェードイン (秒)</label>
+        <input id="setFade" type="number" min="0" max="30" step="1"></div>
+      <div class="setrow"><label class="chk"><input type="checkbox" id="setSpatial"><span>近づくほど大きくなる</span></label></div>
+      <div class="empty">ここを変えると、これから置く場所に使われます。「既存すべてに適用」で今ある場所もまとめて書き換えます。</div>
+
+      <div class="sec-head">
         <div class="sec-name">場 所</div>
       </div>
       <div id="pinList"></div>
@@ -1089,7 +1106,20 @@ body.night .leaflet-tile-pane{filter:saturate(.55) brightness(1.22) contrast(.94
           <label for="pinStart">開始位置 (秒)</label>
           <input id="pinStart" type="number" min="0" step="1" value="0">
         </div>
-        <div class="fld-hint">長さ 0 で最後まで。20秒くらいで切ると「流れた」ではなく「よぎった」に近づきます。</div>
+        <div class="fld fld-2">
+          <div>
+            <label for="pinFade">フェードイン (秒)</label>
+            <input id="pinFade" type="number" min="0" max="30" step="1" value="6">
+          </div>
+          <div>
+            <label for="pinSpatial">音量</label>
+            <select id="pinSpatial">
+              <option value="1">近づくほど大きく</option>
+              <option value="0">一定</option>
+            </select>
+          </div>
+        </div>
+        <div class="fld-hint">長さ 0 で最後まで。「近づくほど大きく」にすると、半径の2.5倍の地点から小さく鳴りはじめ、半径の中で最大になります。歩くこと自体がフェードインになるので、驚きにくくなります。</div>
       </div>
 
       <div class="grp">
@@ -1221,12 +1251,23 @@ const S = {
   draftLatLng: null, editingPinId: null,
   markers: new Map(), meMarker: null, meCircle: null,
   followMe: true,
-  weather: { code: null, at: 0, lat: null, lng: null, failed: false }
+  weather: { code: null, at: 0, lat: null, lng: null, failed: false },
+  settings: null,
+  volTimer: null
 };
 
-const EXIT_FACTOR = 1.6;
-const FADE_IN = 1.6, FADE_OUT = 2.8;
+const EXIT_FACTOR = 1.25;      // 発火範囲のこの倍まで離れたら再発火を許可
+const OUTER_FACTOR = 2.5;      // 距離減衰を使うとき、半径のこの倍から鳴りはじめる
+const FADE_OUT = 2.8;
 const WEATHER_TTL = 15 * 60 * 1000;
+
+/** 既定の鳴らし方。歩きながら詰められるよう、まとめて変えられる */
+const DEFAULTS = { duration: 45, fadeIn: 6, spatial: true };
+function loadSettings(){
+  try{ return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("oto.defaults") || "{}")); }
+  catch(e){ return Object.assign({}, DEFAULTS); }
+}
+function saveSettings(){ localStorage.setItem("oto.defaults", JSON.stringify(S.settings)); }
 
 const $ = id => document.getElementById(id);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -1263,6 +1304,28 @@ function rampTo(v, sec){
   gain.gain.cancelScheduledValues(t);
   gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), t);
   gain.gain.linearRampToValueAtTime(v, t + sec);
+}
+
+/** そのピンが鳴りはじめる距離。距離減衰つきなら外側から */
+function triggerRadius(pin){ return pin.spatial ? pin.radius * OUTER_FACTOR : pin.radius; }
+
+/** 現在地から見た、そのピンの目標音量 (0〜1) */
+function targetVolume(pin){
+  if(!pin.spatial || !S.me) return 1;
+  const d = distM(S.me, pin);
+  const outer = pin.radius * OUTER_FACTOR;
+  if(d <= pin.radius) return 1;
+  if(d >= outer) return 0;
+  const t = (outer - d) / (outer - pin.radius);
+  return Math.pow(t, 1.6);          // 遠いほど急に小さく。実際の減衰に近い聞こえ方
+}
+
+/** 歩くたびに音量を追従させる */
+function updateSpatialVolume(){
+  if(!S.playingPinId) return;
+  const pin = S.pins.find(p => p.id === S.playingPinId);
+  if(!pin || !pin.spatial) return;
+  rampTo(Math.max(targetVolume(pin), 0.0001), 1.2);
 }
 
 async function playPin(pin){
@@ -1302,7 +1365,9 @@ async function playPin(pin){
   if(player.readyState >= 1) seek();
   else player.addEventListener("loadedmetadata", seek, {once:true});
 
-  rampTo(1, FADE_IN);
+  // 距離減衰つきなら、遠い位置では小さく立ち上がる＝接近そのものがフェードインになる
+  const fade = pin.fadeIn == null ? 6 : pin.fadeIn;
+  rampTo(Math.max(targetVolume(pin), 0.0001), Math.max(fade, 0.2));
 
   // 長さを区切る
   if(pin.duration > 0){
@@ -1417,7 +1482,7 @@ function paintMarkers(){
     const playing = S.playingPinId === pin.id;
     if(playing) cls = "playing";
     else if(!eligible(pin).ok && S.mode !== "place") cls = "sleep";
-    else if(S.me && distM(S.me, pin) < pin.radius * 2.2) cls = "near";
+    else if(S.me && distM(S.me, pin) < triggerRadius(pin) * 1.4) cls = "near";
     m.marker.setIcon(pinIcon(pin, cls));
     m.circle.setStyle({
       opacity: playing ? .95 : (cls === "sleep" ? .22 : .5),
@@ -1513,6 +1578,7 @@ function setMe(lat, lng, acc){
   if(S.followMe) map.panTo(ll, { animate:true, duration:.6 });
   refreshWeather(false);
   checkProximity();
+  updateSpatialVolume();
   updateApproach();
   paintMarkers();
 }
@@ -1521,12 +1587,13 @@ function checkProximity(){
   if(!S.me || S.mode === "place") return;
   for(const pin of S.pins){
     const d = distM(S.me, pin);
-    if(d <= pin.radius){
+    const trig = triggerRadius(pin);
+    if(d <= trig){
       if(!pin._fired && !S.playingPinId && eligible(pin).ok){
         pin._fired = true;
         playPin(pin);
       }
-    }else if(d > pin.radius * EXIT_FACTOR){
+    }else if(d > trig * EXIT_FACTOR){
       pin._fired = false;
       if(S.playingPinId === pin.id) stopPlaying();
     }
@@ -1652,6 +1719,7 @@ function pinMeta(pin){
   bits.push("r" + pin.radius + "m");
   if(pin.duration > 0) bits.push(pin.duration + "秒");
   if(pin.startMode === "middle") bits.push("途中から");
+  if(pin.spatial) bits.push("距離で音量");
   if(pin.timeWindow !== "any") bits.push(TIME_LABEL[pin.timeWindow]);
   if(pin.weather !== "any") bits.push(WX_LABEL[pin.weather]);
   if(pin.oncePerDay) bits.push("1日1回");
@@ -1704,7 +1772,31 @@ function renderLists(){
   updateCounts(); updateHint();
 }
 
-function openSheet(){ $("sheet").classList.add("show"); $("scrim").classList.add("show"); renderLists(); }
+function renderSettings(){
+  $("setDuration").value = S.settings.duration;
+  $("setFade").value = S.settings.fadeIn;
+  $("setSpatial").checked = !!S.settings.spatial;
+}
+function readSettings(){
+  S.settings.duration = Math.max(0, Math.min(900, parseInt($("setDuration").value, 10) || 0));
+  S.settings.fadeIn   = Math.max(0, Math.min(30,  parseInt($("setFade").value, 10) || 0));
+  S.settings.spatial  = $("setSpatial").checked;
+  saveSettings();
+}
+async function applyDefaultsToAll(){
+  if(S.pins.length === 0){ toast("まだ場所がありません"); return; }
+  if(!confirm(`${S.pins.length}か所すべての「長さ・フェードイン・音量」を既定値で上書きします。よろしいですか？`)) return;
+  for(const pin of S.pins){
+    pin.duration = S.settings.duration;
+    pin.fadeIn   = S.settings.fadeIn;
+    pin.spatial  = S.settings.spatial;
+    await dbPut("pins", stripPin(pin));
+  }
+  renderPins(); renderLists();
+  toast(S.pins.length + "か所に適用しました");
+}
+
+function openSheet(){ $("sheet").classList.add("show"); $("scrim").classList.add("show"); renderSettings(); renderLists(); }
 function closeSheet(){ $("sheet").classList.remove("show"); $("scrim").classList.remove("show"); }
 
 /* ── ピンダイアログ ── */
@@ -1730,6 +1822,8 @@ function openPinDialog(latlng, editId){
     $("pinStartMode").value = pin.startMode || "middle";
     $("pinStart").value = pin.startAt || 0;
     $("pinDuration").value = pin.duration || 0;
+    $("pinFade").value = pin.fadeIn == null ? 6 : pin.fadeIn;
+    $("pinSpatial").value = pin.spatial ? "1" : "0";
     $("pinTime").value = pin.timeWindow || "any";
     $("pinWeather").value = pin.weather || "any";
     $("pinOnce").checked = !!pin.oncePerDay;
@@ -1743,7 +1837,9 @@ function openPinDialog(latlng, editId){
     $("pinRadius").value = 40;
     $("pinStartMode").value = "middle";
     $("pinStart").value = 0;
-    $("pinDuration").value = 20;
+    $("pinDuration").value = S.settings.duration;
+    $("pinFade").value = S.settings.fadeIn;
+    $("pinSpatial").value = S.settings.spatial ? "1" : "0";
     $("pinTime").value = "any";
     $("pinWeather").value = "any";
     $("pinOnce").checked = false;
@@ -1765,6 +1861,8 @@ async function savePin(){
     startMode: $("pinStartMode").value,
     startAt: Math.max(0, parseInt($("pinStart").value, 10) || 0),
     duration: Math.max(0, parseInt($("pinDuration").value, 10) || 0),
+    fadeIn: Math.max(0, Math.min(30, parseInt($("pinFade").value, 10) || 0)),
+    spatial: $("pinSpatial").value === "1",
     timeWindow: $("pinTime").value,
     weather: $("pinWeather").value,
     oncePerDay: $("pinOnce").checked,
@@ -1789,7 +1887,7 @@ async function savePin(){
   toast(wasEdit ? "更新しました" : "置きました");
 }
 function stripPin(p){
-  const keys = ["id","lat","lng","name","songId","radius","startMode","startAt","duration",
+  const keys = ["id","lat","lng","name","songId","radius","startMode","startAt","duration","fadeIn","spatial",
                 "timeWindow","weather","oncePerDay","lastFiredDay","message","from","secret","revealed","createdAt"];
   const o = {};
   keys.forEach(k => { o[k] = p[k]; });
@@ -1925,6 +2023,8 @@ async function importMap(file){
 document.querySelectorAll(".seg").forEach(btn => btn.addEventListener("click", () => setMode(btn.dataset.mode)));
 $("mapToggle").addEventListener("click", () => applySkin(skin === "day" ? "night" : "day"));
 $("openSheet").addEventListener("click", openSheet);
+["setDuration","setFade","setSpatial"].forEach(id => $(id).addEventListener("change", readSettings));
+$("applyAll").addEventListener("click", applyDefaultsToAll);
 $("closeSheet").addEventListener("click", closeSheet);
 $("scrim").addEventListener("click", closeSheet);
 $("addSongBtn").addEventListener("click", () => $("filePick").click());
@@ -2011,12 +2111,15 @@ document.addEventListener("click", async e => {
    11. 起動
    ══════════════════════════════════════════ */
 (async function init(){
+  S.settings = loadSettings();
   try{
     db = await openDB();
     S.songs = (await dbAll("songs")).sort((a,b) => a.addedAt - b.addedAt);
     S.pins  = (await dbAll("pins")).sort((a,b) => a.createdAt - b.createdAt);
     // 旧バージョンのデータに新しい項目を補う
     S.pins.forEach(p => {
+      if(p.fadeIn   === undefined) p.fadeIn = 6;
+      if(p.spatial  === undefined) p.spatial = false;   // 既存の場所は挙動を変えない
       if(p.startMode === undefined) p.startMode = p.startAt ? "fixed" : "head";
       if(p.duration   === undefined) p.duration = 0;
       if(p.timeWindow === undefined) p.timeWindow = "any";
