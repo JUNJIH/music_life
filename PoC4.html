@@ -960,6 +960,21 @@ body.night .leaflet-tile-pane{filter:saturate(.55) brightness(1.22) contrast(.94
 }
 .toast.show{opacity:1;transform:translate(-50%,0);}
 
+/* ── 写真の振り分け ─────────────────────── */
+.pend-bulk{display:flex;gap:7px;margin-bottom:14px;}
+.pend-bulk .tbtn{flex:1;text-align:center;}
+.pend-row{display:flex;gap:12px;padding:13px 0;border-top:1px solid var(--sen);}
+.pend-row img{width:66px;height:66px;object-fit:cover;border-radius:2px;flex:none;background:var(--kage);}
+.pend-info{flex:1;min-width:0;}
+.pend-time{font-family:var(--mono);font-size:11px;color:var(--shizuka);margin-bottom:8px;letter-spacing:.06em;}
+.pend-opts{display:flex;flex-wrap:wrap;gap:6px;}
+.pend-opt{
+  padding:7px 10px;border:1px solid var(--sen);border-radius:2px;
+  font-size:11.5px;color:var(--shizuka);text-align:left;line-height:1.35;
+}
+.pend-opt small{display:block;font-family:var(--mono);font-size:9px;opacity:.7;margin-top:1px;}
+.pend-opt.on{border-color:var(--gairo);color:var(--kioku);background:rgba(242,166,90,.1);}
+
 /* ── 振り返り ───────────────────────────── */
 .story{
   position:absolute;inset:0;z-index:870;display:none;
@@ -1237,7 +1252,24 @@ body.night .leaflet-tile-pane{filter:saturate(.55) brightness(1.22) contrast(.94
       <div class="story-title" id="storyTitle"></div>
       <div class="story-song" id="storySong"></div>
       <div class="story-place" id="storyPlace"></div>
-      <button class="story-next" id="storyNext">次の曲へ</button>
+      <button class="story-next" id="storyNext">この曲を飛ばす</button>
+    </div>
+  </div>
+
+  <!-- 曲が鳴っていない時間に撮られた写真の行き先 -->
+  <div class="dlg" id="pendDlg">
+    <div class="dlg-box">
+      <div class="dlg-title">この写真、どの曲に入れますか</div>
+      <div class="dlg-note" id="pendNote"></div>
+      <div class="pend-bulk">
+        <button class="tbtn" id="pendAllBefore">すべて前の曲へ</button>
+        <button class="tbtn" id="pendAllAfter">すべて次の曲へ</button>
+      </div>
+      <div id="pendList"></div>
+      <div class="dlg-btns">
+        <button class="b-ghost" id="pendCancel">やめる</button>
+        <button class="b-fill" id="pendApply">決定</button>
+      </div>
     </div>
   </div>
 
@@ -1516,6 +1548,7 @@ function startWalk(){
 function notePlayStart(pin, song){
   if(!S.walk) return;
   S.walk.plays.push({
+    id: uid(),                  // 再生1回ごとの識別子。同じ曲を別の場所に置いても混ざらない
     at: Date.now(), until: null,
     pinId: pin.id, pinName: pin.name || "",
     songId: pin.songId, songName: song ? song.name : "",
@@ -2290,27 +2323,116 @@ function shrinkImage(file, max){
   });
 }
 
+let pendingPhotos = [];   // 曲が鳴っていない時間に撮られ、行き先を選んでもらう写真
+
 async function importPhotos(walkId, files){
   const walk = S.walks.find(w => w.id === walkId);
   if(!walk) return;
   toast(files.length + "枚を読み込んでいます…");
   let matched = 0, skipped = 0;
+  pendingPhotos = [];
   for(const f of files){
     if(!/^image\//.test(f.type)){ skipped++; continue; }
     const at = await readShotTime(f);
     const pl = playAtTime(walk, at);
-    if(!pl){ skipped++; continue; }                 // 曲が鳴っていない時間の写真は取り込まない
+    if(!pl){
+      // 捨てずに保留する。あとで本人に選んでもらう
+      let b; try{ b = await shrinkImage(f, 1280); }catch(e){ b = f; }
+      pendingPhotos.push({ walkId, at, blob: b });
+      continue;
+    }
     let blob;
     try{ blob = await shrinkImage(f, 1280); }catch(e){ blob = f; }
-    walk.photos.push({ id: uid(), at, blob, songName: pl.songName, pinName: pl.pinName, songId: pl.songId });
+    walk.photos.push({ id: uid(), at, blob, playId: pl.id,
+                       songName: pl.songName, pinName: pl.pinName, songId: pl.songId });
     matched++;
   }
   walk.photos.sort((a,b) => a.at - b.at);
   await dbPut("walks", walk).catch(()=>{});
   renderWalks();
-  toast(matched
-    ? `${matched}枚を取り込みました${skipped ? "（" + skipped + "枚は曲が鳴っていない時間）" : ""}`
-    : "曲が鳴っていた時間の写真が見つかりませんでした");
+  if(pendingPhotos.length){
+    pendingPhotos.sort((a,b) => a.at - b.at);
+    openPending(walk, matched);
+  }else{
+    toast(matched ? `${matched}枚を取り込みました` : "曲が鳴っていた時間の写真が見つかりませんでした");
+  }
+}
+
+/** その写真の前後で鳴っていた曲を探す */
+function neighborPlays(walk, at){
+  let before = null, after = null;
+  for(const pl of walk.plays){
+    const end = pl.until || pl.at;
+    if(end <= at && (!before || end > (before.until || before.at))) before = pl;
+    if(pl.at >= at && (!after || pl.at < after.at)) after = pl;
+  }
+  return { before, after };
+}
+
+function openPending(walk, matched){
+  const box = $("pendList");
+  $("pendNote").textContent = matched
+    ? `${matched}枚は自動で取り込みました。次の${pendingPhotos.length}枚は、曲が鳴っていない時間に撮られています。`
+    : `${pendingPhotos.length}枚は、曲が鳴っていない時間に撮られています。`;
+  box.innerHTML = "";
+  pendingPhotos.forEach((ph, i) => {
+    const nb = neighborPlays(walk, ph.at);
+    const url = URL.createObjectURL(ph.blob);
+    ph._url = url;
+    const opts = [];
+    if(nb.before) opts.push(`<button class="pend-opt" data-pend="${i}" data-play="${nb.before.id}">${esc(nb.before.songName || "前の曲")}<small>${esc(nb.before.pinName || "")} ${fmtTime(nb.before.at)}</small></button>`);
+    if(nb.after)  opts.push(`<button class="pend-opt" data-pend="${i}" data-play="${nb.after.id}">${esc(nb.after.songName || "次の曲")}<small>${esc(nb.after.pinName || "")} ${fmtTime(nb.after.at)}</small></button>`);
+    opts.push(`<button class="pend-opt off on" data-pend="${i}" data-play="">入れない</button>`);
+    const row = document.createElement("div");
+    row.className = "pend-row";
+    row.innerHTML = `<img src="${url}" alt=""><div class="pend-info">
+      <div class="pend-time">${fmtTime(ph.at)}</div>
+      <div class="pend-opts">${opts.join("")}</div></div>`;
+    box.appendChild(row);
+  });
+  // 一括操作は、前後どちらかが存在する写真がある場合だけ出す
+  const anyBefore = pendingPhotos.some(ph => neighborPlays(walk, ph.at).before);
+  const anyAfter  = pendingPhotos.some(ph => neighborPlays(walk, ph.at).after);
+  $("pendAllBefore").hidden = !anyBefore;
+  $("pendAllAfter").hidden = !anyAfter;
+  $("pendDlg").classList.add("show");
+}
+
+function pendSelect(i, playId){
+  pendingPhotos[i]._playId = playId || null;
+  $("pendList").querySelectorAll(`[data-pend="${i}"]`).forEach(b =>
+    b.classList.toggle("on", (b.dataset.play || "") === (playId || "")));
+}
+function pendSelectAll(which){
+  const walk = S.walks.find(w => w.id === pendingPhotos[0].walkId);
+  pendingPhotos.forEach((ph, i) => {
+    const nb = neighborPlays(walk, ph.at);
+    const target = which === "before" ? nb.before : nb.after;
+    if(target) pendSelect(i, target.id);
+  });
+}
+
+async function pendApply(){
+  const walk = S.walks.find(w => w.id === pendingPhotos[0].walkId);
+  let added = 0;
+  for(const ph of pendingPhotos){
+    if(!ph._playId) continue;
+    const pl = walk.plays.find(p => p.id === ph._playId);
+    if(!pl) continue;
+    walk.photos.push({ id: uid(), at: ph.at, blob: ph.blob, playId: pl.id,
+                       songName: pl.songName, pinName: pl.pinName, songId: pl.songId });
+    added++;
+  }
+  walk.photos.sort((a,b) => a.at - b.at);
+  await dbPut("walks", walk).catch(()=>{});
+  closePending();
+  renderWalks();
+  toast(added ? added + "枚を追加しました" : "追加しませんでした");
+}
+function closePending(){
+  pendingPhotos.forEach(ph => { if(ph._url) URL.revokeObjectURL(ph._url); });
+  pendingPhotos = [];
+  $("pendDlg").classList.remove("show");
 }
 
 /* ── 振り返り再生 ── */
@@ -2337,7 +2459,6 @@ function walkNext(){
   const g = groups[st.index];
   const song = S.songs.find(s => s.id === g.songId);
   $("storySong").textContent = g.songName || "曲";
-  $("storyPlace").textContent = (g.pinName || "") + " · " + fmtTime(g.photos[0].at);
   $("storyCount").textContent = (st.index + 1) + " / " + groups.length;
 
   if(song){
@@ -2353,17 +2474,21 @@ function walkNext(){
 }
 
 /** 写真を曲ごとにまとめる */
+/** 写真を「再生1回」ごとにまとめる。
+    曲IDで束ねると、同じ曲を別の場所に置いたとき2か所が1つに統合されてしまう */
 function storyGroups(walk){
   const out = [];
   walk.photos.forEach(ph => {
+    const key = ph.playId || ("legacy:" + ph.songId);   // 旧データは曲IDで代用
     const last = out[out.length - 1];
-    if(last && last.songId === ph.songId) last.photos.push(ph);
-    else out.push({ songId: ph.songId, songName: ph.songName, pinName: ph.pinName, photos: [ph] });
+    if(last && last.key === key) last.photos.push(ph);
+    else out.push({ key, songId: ph.songId, songName: ph.songName, pinName: ph.pinName, photos: [ph] });
   });
   return out;
 }
 
 let slideTimer = null, slideURLs = [];
+/** その曲の間に撮った写真を順に出す。1枚ごとに撮った時刻と場所を添える */
 function showSlides(photos){
   clearInterval(slideTimer);
   slideURLs.forEach(u => URL.revokeObjectURL(u));
@@ -2371,8 +2496,14 @@ function showSlides(photos){
   let i = 0;
   const img = $("storyImg");
   const show = () => {
+    const ph = photos[i % photos.length];
     img.style.opacity = 0;
-    setTimeout(() => { img.src = slideURLs[i % slideURLs.length]; img.style.opacity = 1; }, 420);
+    setTimeout(() => {
+      img.src = slideURLs[i % slideURLs.length];
+      img.style.opacity = 1;
+      $("storyPlace").textContent =
+        fmtTime(ph.at) + (ph.pinName ? " · " + ph.pinName : "") + " · " + ((i % photos.length) + 1) + "/" + photos.length;
+    }, 420);
     i++;
   };
   show();
@@ -2468,6 +2599,15 @@ $("filePick").addEventListener("change", async e => {
     $("noSongHint").hidden = true;
   }
   toast(files.length + "曲を追加しました");
+});
+
+$("pendCancel").addEventListener("click", closePending);
+$("pendApply").addEventListener("click", pendApply);
+$("pendAllBefore").addEventListener("click", () => pendSelectAll("before"));
+$("pendAllAfter").addEventListener("click", () => pendSelectAll("after"));
+$("pendList").addEventListener("click", e => {
+  const b = e.target.closest("[data-pend]");
+  if(b) pendSelect(+b.dataset.pend, b.dataset.play);
 });
 
 $("storyClose").addEventListener("click", closeStory);
